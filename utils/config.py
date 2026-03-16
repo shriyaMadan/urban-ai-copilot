@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Tuple
 
 from dotenv import load_dotenv
@@ -11,6 +12,67 @@ from utils.helpers import parse_supported_cities
 
 
 DEFAULT_SUPPORTED_CITIES = "Berlin,Hamburg,Munich,Cologne,Frankfurt"
+
+
+def _read_streamlit_secret(key: str) -> str | None:
+    """Read from Streamlit secrets if available."""
+    if not (
+        (Path.cwd() / ".streamlit" / "secrets.toml").is_file()
+        or (Path.home() / ".streamlit" / "secrets.toml").is_file()
+    ):
+        return None
+
+    try:
+        import streamlit as st
+    except Exception:
+        return None
+
+    try:
+        if key in st.secrets:
+            value = st.secrets[key]
+            return str(value).strip()
+    except Exception:
+        return None
+
+    return None
+
+
+def _read_config_value(key: str, default: str | None = None) -> str | None:
+    """Read config value with env-first, Streamlit-secrets fallback."""
+    env_value = os.getenv(key)
+    if env_value is not None and env_value.strip():
+        return env_value.strip()
+
+    secret_value = _read_streamlit_secret(key)
+    if secret_value:
+        return secret_value
+
+    return default
+
+
+def _clean_optional_token(value: str | None) -> str | None:
+    """Normalize optional token values and ignore placeholders."""
+    if value is None:
+        return None
+
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+
+    placeholder_tokens = {
+        "your_api_key",
+        "your_key",
+        "your_weather_api_key",
+        "your_openai_key",
+        "your_gemini_key",
+        "your_tomtom_key",
+        "replace_me",
+        "changeme",
+    }
+    if cleaned.lower() in placeholder_tokens:
+        return None
+
+    return cleaned
 
 
 def validate_environment(
@@ -70,16 +132,18 @@ class AppConfig:
 
     @classmethod
     def from_env(cls) -> "AppConfig":
-        """Load configuration from environment variables."""
+        """Load config from env vars with Streamlit secrets fallback."""
+        load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
         load_dotenv()
 
         supported = parse_supported_cities(
-            os.getenv("SUPPORTED_CITIES", DEFAULT_SUPPORTED_CITIES)
+            _read_config_value("SUPPORTED_CITIES", DEFAULT_SUPPORTED_CITIES)
+            or DEFAULT_SUPPORTED_CITIES
         )
         if not supported:
             supported = parse_supported_cities(DEFAULT_SUPPORTED_CITIES)
 
-        requested_default_city = os.getenv("DEFAULT_CITY", "Berlin")
+        requested_default_city = _read_config_value("DEFAULT_CITY", "Berlin") or "Berlin"
         default_city = (
             requested_default_city
             if requested_default_city in supported
@@ -87,19 +151,27 @@ class AppConfig:
         )
 
         config = cls(
-            weather_api_key=os.getenv("WEATHER_API_KEY"),
-            openai_api_key=os.getenv("OPENAI_API_KEY"),
-            gemini_api_key=os.getenv("GEMINI_API_KEY"),
-            tomtom_api_key=os.getenv("TOMTOM_API_KEY"),
-            weather_api_base_url=os.getenv(
-                "WEATHER_API_BASE_URL", "https://api.open-meteo.com/v1"
+            weather_api_key=_clean_optional_token(_read_config_value("WEATHER_API_KEY")),
+            openai_api_key=_clean_optional_token(_read_config_value("OPENAI_API_KEY")),
+            gemini_api_key=_clean_optional_token(_read_config_value("GEMINI_API_KEY")),
+            tomtom_api_key=_clean_optional_token(_read_config_value("TOMTOM_API_KEY")),
+            weather_api_base_url=(
+                _read_config_value("WEATHER_API_BASE_URL", "https://api.open-meteo.com/v1")
+                or "https://api.open-meteo.com/v1"
             ),
-            tomtom_api_base_url=os.getenv(
-                "TOMTOM_API_BASE_URL", "https://api.tomtom.com/traffic/services/4"
+            tomtom_api_base_url=(
+                _read_config_value(
+                    "TOMTOM_API_BASE_URL",
+                    "https://api.tomtom.com/traffic/services/4",
+                )
+                or "https://api.tomtom.com/traffic/services/4"
             ),
-            pegelonline_api_base_url=os.getenv(
-                "PEGELONLINE_API_BASE_URL",
-                "https://www.pegelonline.wsv.de/webservices/rest-api/v2",
+            pegelonline_api_base_url=(
+                _read_config_value(
+                    "PEGELONLINE_API_BASE_URL",
+                    "https://www.pegelonline.wsv.de/webservices/rest-api/v2",
+                )
+                or "https://www.pegelonline.wsv.de/webservices/rest-api/v2"
             ),
             default_city=default_city,
             supported_cities=tuple(supported),

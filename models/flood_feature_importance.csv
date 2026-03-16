@@ -1,0 +1,8 @@
+feature,importance
+rainfall_mm_next_6h,0.8502475881168703
+rainfall_mm_next_3h,0.12409645247553389
+river_water_level_cm,0.007670732737168319
+humidity,0.007001029144489744
+wind_speed,0.005572195840569708
+temperature_c,0.00541200168536811
+district_vulnerability_encoded,0.0

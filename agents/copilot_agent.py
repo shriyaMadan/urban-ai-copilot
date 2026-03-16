@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Mapping
 
 import requests
@@ -65,7 +66,7 @@ class CopilotAgent:
                     heat_risk=heat_risk,
                     traffic_risk=traffic_risk,
                 )
-            except (requests.RequestException, ValueError, KeyError, TypeError):
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
                 # Graceful fallback keeps app operational if LLM is unavailable.
                 fallback_plan = self._generate_rule_based_recommendations(
                     city_state=city_state,
@@ -76,7 +77,10 @@ class CopilotAgent:
                 return CopilotPlan(
                     mode="rule_based_fallback",
                     urgency=fallback_plan.urgency,
-                    rationale="AI endpoint unavailable; switched to deterministic fallback recommendations.",
+                    rationale=(
+                        f"{self._format_ai_fallback_reason(exc)} "
+                        "Switched to deterministic fallback recommendations."
+                    ),
                     recommendations=fallback_plan.recommendations,
                 )
 
@@ -253,9 +257,9 @@ class CopilotAgent:
         1) Explicit OpenAI-compatible settings (`OPENAI_*`)
         2) Gemini key via OpenAI-compatible endpoint (`GEMINI_*`)
         """
-        openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        openai_base_url = os.getenv("OPENAI_BASE_URL", "").strip()
-        openai_model = os.getenv("OPENAI_MODEL", "").strip()
+        openai_api_key = self._read_config_value("OPENAI_API_KEY")
+        openai_base_url = self._read_config_value("OPENAI_BASE_URL")
+        openai_model = self._read_config_value("OPENAI_MODEL")
 
         if openai_api_key and openai_base_url and openai_model:
             return {
@@ -264,18 +268,42 @@ class CopilotAgent:
                 "model": openai_model,
             }
 
-        gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        gemini_api_key = self._read_config_value("GEMINI_API_KEY")
         if gemini_api_key:
             return {
                 "api_key": gemini_api_key,
-                "base_url": os.getenv(
+                "base_url": self._read_config_value(
                     "GEMINI_OPENAI_BASE_URL",
                     "https://generativelanguage.googleapis.com/v1beta/openai",
-                ).strip(),
-                "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip(),
+                )
+                or "https://generativelanguage.googleapis.com/v1beta/openai",
+                "model": self._read_config_value("GEMINI_MODEL", "gemini-2.0-flash")
+                or "gemini-2.0-flash",
             }
 
         return None
+
+    def _read_config_value(self, key: str, default: str = "") -> str:
+        """Read config from env first, then Streamlit secrets."""
+        env_value = os.getenv(key, "").strip()
+        if env_value:
+            return env_value
+
+        if not (
+            (Path.cwd() / ".streamlit" / "secrets.toml").is_file()
+            or (Path.home() / ".streamlit" / "secrets.toml").is_file()
+        ):
+            return default
+
+        try:
+            import streamlit as st
+
+            if key in st.secrets:
+                return str(st.secrets[key]).strip()
+        except Exception:
+            pass
+
+        return default
 
     def _build_llm_prompt(
         self,
@@ -314,6 +342,74 @@ class CopilotAgent:
             raise ValueError("LLM response JSON is not an object.")
 
         return parsed
+
+    def _format_ai_fallback_reason(self, exc: Exception) -> str:
+        """Produce a concise, user-friendly reason when AI mode fails."""
+        if isinstance(exc, requests.HTTPError):
+            response = exc.response
+            status_code = response.status_code if response is not None else None
+            provider_message = self._extract_provider_error_message(response)
+
+            if status_code == 429:
+                if provider_message:
+                    return f"AI quota/rate limit reached (HTTP 429): {provider_message}."
+                return "AI quota/rate limit reached (HTTP 429)."
+
+            if status_code is not None:
+                if provider_message:
+                    return f"AI provider request failed (HTTP {status_code}): {provider_message}."
+                return f"AI provider request failed (HTTP {status_code})."
+
+        if isinstance(exc, requests.Timeout):
+            return "AI provider request timed out."
+
+        if isinstance(exc, requests.ConnectionError):
+            return "AI provider connection failed."
+
+        details = str(exc).strip()
+        if details:
+            return f"AI response error: {self._truncate_text(details)}."
+
+        return "AI endpoint unavailable."
+
+    def _extract_provider_error_message(self, response: requests.Response | None) -> str:
+        """Extract and sanitize provider error details from an HTTP response."""
+        if response is None:
+            return ""
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return ""
+
+        error_payload = payload.get("error", {}) if isinstance(payload, dict) else {}
+        if not isinstance(error_payload, dict):
+            return ""
+
+        status = str(error_payload.get("status", "")).strip()
+        message = str(error_payload.get("message", "")).strip()
+
+        if message:
+            cleaned_message = " ".join(message.split())
+            for marker in (
+                " For more information",
+                " To monitor your current usage",
+                " Please retry in",
+            ):
+                if marker in cleaned_message:
+                    cleaned_message = cleaned_message.split(marker, 1)[0].strip()
+            message = self._truncate_text(cleaned_message)
+
+        if status and message and status.lower() not in message.lower():
+            return f"{status}: {message}"
+        return message or status
+
+    def _truncate_text(self, text: str, max_len: int = 220) -> str:
+        """Truncate long provider diagnostics for readable UI output."""
+        compact = " ".join(text.split())
+        if len(compact) <= max_len:
+            return compact
+        return f"{compact[: max_len - 1].rstrip()}…"
 
     def _normalize_urgency(self, urgency: str) -> str:
         """Normalize urgency label to expected values."""

@@ -167,6 +167,28 @@ Simulation is applied to the baseline `CityState` in a deterministic way:
 
 After simulation, risks are recomputed and displayed alongside baseline values in the **Scenario Comparison** section.
 
+## Flood ML (Current Scope)
+
+- Flood prediction runs in **Auto mode** inside the app:
+  - use ML model (`models/flood_risk.pkl`) when available,
+  - otherwise fallback to rule-based flood scoring.
+- The current global model is trained mostly on Dortmund-collected samples,
+  so predictions for other cities are more generalized until broader city
+  coverage is logged.
+
+### Retraining guidance
+
+When fresh data accumulates in `data/flood_training.csv`, retrain the model:
+
+```bash
+python ml/train_flood_model.py --min-rows 30 --cv-folds 5
+```
+
+Training outputs include:
+- `models/flood_risk.pkl` (model artifact)
+- `models/flood_feature_importance.csv` (feature importance)
+- `models/flood_model_metadata.json` (training snapshot + metrics)
+
 ## Limitations
 
 - Risk models are transparent heuristics, not calibrated predictive models.

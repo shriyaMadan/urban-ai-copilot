@@ -5,8 +5,16 @@ from typing import Any
 
 import streamlit as st
 
+st.set_page_config(
+    page_title="Urban AI Copilot",
+    page_icon="🌆",
+    layout="wide",
+)
+
 from agents.copilot_agent import CopilotAgent, CopilotPlan
 from core.data_model import CityState
+from ml.model_diagnostics import collect_flood_model_diagnostics
+from ml.flood_predictor import FloodMLPredictor
 from risk.flood_risk import FloodRiskModel
 from risk.heat_risk import HeatRiskModel
 from risk.traffic_risk import TrafficRiskModel
@@ -16,6 +24,7 @@ from services.traffic_service import TrafficService
 from services.weather_service import WeatherService
 from simulation.scenario_engine import ScenarioEngine
 from utils.config import AppConfig
+from utils.flood_training_logger import log_flood_training_sample
 
 
 CITY_OPTIONS = ["Dortmund", "Bochum", "Essen", "Cologne", "Berlin"]
@@ -104,6 +113,34 @@ def _risk_label(score_payload: dict[str, Any]) -> str:
     return f"{score_payload['score']} ({score_payload['level']})"
 
 
+def _build_flood_sample_key(city_state: CityState, flood_risk: dict[str, Any]) -> str:
+    """Build a compact key to avoid duplicate training rows per Streamlit rerun."""
+    return "|".join(
+        [
+            city_state.city,
+            city_state.timestamp,
+            city_state.district_vulnerability,
+            str(round(city_state.rainfall_mm_next_6h, 2)),
+            str(round(city_state.river_water_level_cm, 1)),
+            str(int(flood_risk.get("score", 0))),
+        ]
+    )
+
+
+def _log_flood_training_row(city_state: CityState, flood_risk: dict[str, Any]) -> None:
+    """Persist one flood training sample with rerun-safe deduping."""
+    sample_key = _build_flood_sample_key(city_state, flood_risk)
+    if st.session_state.get("last_flood_training_sample_key") == sample_key:
+        return
+
+    try:
+        log_flood_training_sample(city_state=city_state, flood_risk=flood_risk)
+        st.session_state["last_flood_training_sample_key"] = sample_key
+    except Exception:
+        # Logging should never break the dashboard experience.
+        pass
+
+
 def _load_baseline_city_state(
     city: str,
     district_vulnerability: str,
@@ -177,6 +214,43 @@ def _compute_risks(
     return flood_risk, heat_risk, traffic_risk
 
 
+def _apply_ml_flood_prediction(
+    city_state: CityState,
+    rule_based_flood_risk: dict[str, Any],
+    predictor: FloodMLPredictor,
+) -> dict[str, Any]:
+    """Replace flood score with ML prediction when model artifact is available."""
+    if not predictor.is_ready:
+        fallback_payload = dict(rule_based_flood_risk)
+        fallback_payload["source"] = "rule_based"
+        fallback_payload["reason"] = (
+            f"{fallback_payload.get('reason', '')} "
+            "(ML model unavailable, using rule-based flood score.)"
+        ).strip()
+        return fallback_payload
+
+    try:
+        ml_prediction = predictor.predict(city_state)
+        return {
+            "risk_name": "Flood Risk",
+            "score": ml_prediction.score,
+            "level": ml_prediction.level,
+            "reason": (
+                f"{ml_prediction.detail} "
+                f"(rule-based reference={rule_based_flood_risk.get('score', 0)})."
+            ),
+            "source": ml_prediction.source,
+        }
+    except Exception:
+        fallback_payload = dict(rule_based_flood_risk)
+        fallback_payload["source"] = "rule_based"
+        fallback_payload["reason"] = (
+            f"{fallback_payload.get('reason', '')} "
+            "(ML prediction failed, using rule-based flood score.)"
+        ).strip()
+        return fallback_payload
+
+
 def _generate_copilot_plan(
     copilot_agent: CopilotAgent,
     city_state: CityState,
@@ -224,16 +298,12 @@ def main() -> None:
     )
 
     flood_model = FloodRiskModel()
+    flood_ml_predictor = FloodMLPredictor()
+    flood_ml_diagnostics = collect_flood_model_diagnostics(top_n=5)
     heat_model = HeatRiskModel()
     traffic_model = TrafficRiskModel()
     scenario_engine = ScenarioEngine()
     copilot_agent = CopilotAgent(has_ai_key=config.has_ai_provider_key)
-
-    st.set_page_config(
-        page_title="Urban AI Copilot",
-        page_icon="🌆",
-        layout="wide",
-    )
 
     header = st.container()
     with header:
@@ -267,14 +337,27 @@ def main() -> None:
         temperature_delta = st.slider("Temperature Delta (°C)", -5.0, 5.0, 0.0, 0.5)
         force_rush_hour = st.checkbox("Force Rush Hour Scenario", value=False)
 
+        st.markdown("### Flood ML Status")
+        if flood_ml_diagnostics.model_exists and not flood_ml_diagnostics.is_stale:
+            st.success("Flood model: Ready (up-to-date)")
+        elif flood_ml_diagnostics.model_exists and flood_ml_diagnostics.is_stale:
+            st.warning("Flood model: Available, but stale vs training data")
+        else:
+            st.warning("Flood model: Missing (rule-based fallback active)")
+
+        st.caption(f"Freshness note: {flood_ml_diagnostics.stale_reason}")
+        st.info(
+            "Coverage note: model is currently trained mostly on Dortmund-collected "
+            "samples; predictions for other cities are more generalized."
+        )
+
+        if flood_ml_diagnostics.top_features:
+            with st.expander("Top Flood ML Features"):
+                st.table(flood_ml_diagnostics.top_features)
+
         refresh_pressed = st.button("Refresh")
         if refresh_pressed:
             st.rerun()
-
-        st.caption(
-            "Tip: add more cities with SUPPORTED_CITIES in your .env "
-            "(comma-separated)."
-        )
 
     baseline_state, weather_data, context_data = _load_baseline_city_state(
         city=city,
@@ -304,7 +387,7 @@ def main() -> None:
         simulated_state = baseline_state
 
     # 5) Compute baseline risks
-    baseline_flood, baseline_heat, baseline_traffic = _compute_risks(
+    baseline_flood_rule, baseline_heat, baseline_traffic = _compute_risks(
         city_state=baseline_state,
         flood_model=flood_model,
         heat_model=heat_model,
@@ -312,13 +395,30 @@ def main() -> None:
         phase_label="Baseline",
     )
 
+    # Auto mode: prefer ML flood prediction when available, fallback to rules.
+    baseline_flood = _apply_ml_flood_prediction(
+        city_state=baseline_state,
+        rule_based_flood_risk=baseline_flood_rule,
+        predictor=flood_ml_predictor,
+    )
+
+    # Persist one training sample (features + synthetic flood label) for ML phase.
+    _log_flood_training_row(city_state=baseline_state, flood_risk=baseline_flood_rule)
+
     # 6) Compute simulated risks
-    simulated_flood, simulated_heat, simulated_traffic = _compute_risks(
+    simulated_flood_rule, simulated_heat, simulated_traffic = _compute_risks(
         city_state=simulated_state,
         flood_model=flood_model,
         heat_model=heat_model,
         traffic_model=traffic_model,
         phase_label="Simulation",
+    )
+
+    # Prefer ML flood prediction in simulation when model artifact is available.
+    simulated_flood = _apply_ml_flood_prediction(
+        city_state=simulated_state,
+        rule_based_flood_risk=simulated_flood_rule,
+        predictor=flood_ml_predictor,
     )
 
     # 7) Generate recommendations
@@ -357,11 +457,13 @@ def main() -> None:
 
     # 3) Three risk cards
     st.subheader("Risk Overview")
+    st.caption("All risk scores are on a 0–100 scale (i.e., score / 100).")
     risk_col1, risk_col2, risk_col3 = st.columns(3)
     with risk_col1:
         with st.container(border=True):
             st.markdown("### Flood Risk")
             st.metric("Current", _risk_label(simulated_flood))
+            st.caption(f"Source: {simulated_flood.get('source', 'rule_based')}")
             st.caption(simulated_flood["reason"])
     with risk_col2:
         with st.container(border=True):
@@ -410,6 +512,11 @@ def main() -> None:
                 "Metric": "Flood Risk Score",
                 "Baseline": str(baseline_flood["score"]),
                 "Simulated": str(simulated_flood["score"]),
+            },
+            {
+                "Metric": "Flood Risk Source",
+                "Baseline": str(baseline_flood.get("source", "rule_based")),
+                "Simulated": str(simulated_flood.get("source", "rule_based")),
             },
             {
                 "Metric": "Traffic Risk Score",
