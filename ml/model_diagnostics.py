@@ -167,13 +167,24 @@ def _read_top_feature_importances(path: Path, top_n: int) -> list[dict[str, str]
             for idx, row in enumerate(reader):
                 if idx >= top_n:
                     break
+                raw_importance = row.get("importance", "")
                 rows.append(
                     {
                         "feature": str(row.get("feature", "")),
-                        "importance": str(row.get("importance", "")),
+                        "importance": _format_importance_value(raw_importance),
                     }
                 )
     except Exception:
         return []
 
     return rows
+
+
+def _format_importance_value(value: object) -> str:
+    """Format feature importance values for cleaner frontend display."""
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    return f"{numeric_value:.4f}"
