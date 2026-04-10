@@ -1,6 +1,8 @@
 """Streamlit entrypoint for the Urban AI Copilot."""
 from __future__ import annotations
 
+import html
+import re
 from typing import Any
 
 import streamlit as st
@@ -111,6 +113,89 @@ def _fallback_risk_payload(risk_name: str, reason: str) -> dict[str, Any]:
 def _risk_label(score_payload: dict[str, Any]) -> str:
     """Format risk score payload for metric display."""
     return f"{score_payload['score']} ({score_payload['level']})"
+
+
+def _format_guidance_preview(text: str, max_chars: int = 220) -> str:
+    """Convert raw retrieved chunk text into a short, frontend-friendly preview."""
+    normalized = _normalize_guidance_text(text)
+    if not normalized:
+        return ""
+
+    preview = " • ".join(normalized[:4])
+    preview = re.sub(r"\s+", " ", preview).strip()
+
+    if len(preview) > max_chars:
+        preview = f"{preview[: max_chars - 1].rstrip()}…"
+
+    return preview
+
+
+def _normalize_guidance_text(text: str) -> list[str]:
+    """Normalize raw retrieved text into readable lines for preview/full display."""
+    normalized = text.strip()
+    if not normalized:
+        return []
+
+    replacements = {
+        "[risk/event]": "current risk event",
+        "[area]": "affected district",
+        "[time]": "next city update",
+        "[short impact statement]": "localized disruption or public safety impacts",
+        "[top 2-3 protective actions]": "priority protective actions issued by the city",
+        "[roads/zones/activities]": "affected roads, zones, or activities",
+        "[immediate safety action and contact channel]": "follow immediate safety instructions and use the designated city contact channel",
+        "[brief list]": "temporary restrictions remain in selected locations",
+        "[if any]": "localized caution where needed",
+    }
+    for old, new in replacements.items():
+        normalized = normalized.replace(old, new)
+
+    normalized = normalized.replace("## ", "")
+    normalized = normalized.replace("# ", "")
+    normalized = normalized.replace('"', "")
+
+    return [
+        re.sub(r"^[-*]\s*", "", line).strip()
+        for line in normalized.splitlines()
+        if line.strip()
+    ]
+
+
+def _format_guidance_full_text(text: str) -> str:
+    """Format full retrieved text for a compact show-more block."""
+    lines = _normalize_guidance_text(text)
+    if not lines:
+        return ""
+
+    escaped_lines = [html.escape(line) for line in lines]
+    return "<br>".join(escaped_lines)
+
+
+def _ensure_rag_bootstrap(config: AppConfig) -> dict[str, Any]:
+    """Ensure the local RAG index exists when retrieval is enabled."""
+    if not config.rag_enabled:
+        return {"enabled": False, "status": "disabled"}
+
+    try:
+        from rag.ingest import ensure_rag_index
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "status": "error",
+            "detail": f"RAG bootstrap import failed: {exc}",
+        }
+
+    try:
+        result = ensure_rag_index(force_recreate=False)
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "status": "error",
+            "detail": str(exc),
+        }
+
+    result["enabled"] = True
+    return result
 
 
 def _build_flood_sample_key(city_state: CityState, flood_risk: dict[str, Any]) -> str:
@@ -279,7 +364,14 @@ def _generate_copilot_plan(
 
 def main() -> None:
     """Render a polished decision-support dashboard."""
+    # Guard against stale auto-generated widget IDs across Streamlit restarts
+    # and dependency upgrades. We use explicit widget keys below.
+    for state_key in list(st.session_state.keys()):
+        if state_key.startswith("$$WIDGET_ID-"):
+            st.session_state.pop(state_key, None)
+
     config = AppConfig.from_env()
+    rag_status = _ensure_rag_bootstrap(config)
 
     weather_service = WeatherService(
         api_key=config.weather_api_key,
@@ -303,7 +395,14 @@ def main() -> None:
     heat_model = HeatRiskModel()
     traffic_model = TrafficRiskModel()
     scenario_engine = ScenarioEngine()
-    copilot_agent = CopilotAgent(has_ai_key=config.has_ai_provider_key)
+    copilot_agent = CopilotAgent(
+        has_ai_key=config.has_ai_provider_key,
+        rag_enabled=config.rag_enabled,
+        rag_top_k=config.rag_top_k,
+        rag_collection=config.rag_collection,
+        rag_qdrant_path=config.rag_qdrant_path,
+        embedding_model=config.embedding_model,
+    )
 
     header = st.container()
     with header:
@@ -324,12 +423,14 @@ def main() -> None:
             "German City",
             options=available_cities,
             index=default_city_index,
+            key="selected_city",
         )
 
         district_vulnerability = st.selectbox(
             "District Vulnerability",
             options=["low", "medium", "high"],
             index=1,
+            key="district_vulnerability",
         )
 
         st.markdown("### Simulation")
@@ -354,6 +455,21 @@ def main() -> None:
         if flood_ml_diagnostics.top_features:
             with st.expander("Top Flood ML Features"):
                 st.table(flood_ml_diagnostics.top_features)
+
+        if config.rag_enabled:
+            st.markdown("### RAG Status")
+            rag_state = str(rag_status.get("status", "unknown"))
+            if rag_state in {"ready", "created"}:
+                chunk_total = int(rag_status.get("chunks_indexed", 0) or 0)
+                if rag_status.get("skipped"):
+                    st.success(f"Knowledge index ready ({chunk_total} chunks)")
+                else:
+                    st.success(f"Knowledge index built ({chunk_total} chunks)")
+            else:
+                st.warning(
+                    "RAG enabled, but the knowledge index is unavailable. "
+                    f"Details: {rag_status.get('detail', 'Unknown error')}"
+                )
 
         refresh_pressed = st.button("Refresh")
         if refresh_pressed:
@@ -488,6 +604,49 @@ def main() -> None:
         st.caption(copilot_plan.rationale)
         for idx, item in enumerate(copilot_plan.recommendations, start=1):
             st.markdown(f"**{idx}. {item.title}** — {item.summary}")
+
+        if copilot_plan.retrieved_guidance:
+            with st.expander("Retrieved Guidance / Sources"):
+                for idx, item in enumerate(copilot_plan.retrieved_guidance, start=1):
+                    source = str(item.get("source", "unknown"))
+                    score = float(item.get("score", 0.0))
+                    raw_chunk_text = str(item.get("text", ""))
+                    chunk_preview = _format_guidance_preview(raw_chunk_text)
+                    full_chunk_text = _format_guidance_full_text(raw_chunk_text)
+
+                    st.markdown(
+                        (
+                            "<div style='font-size:0.74rem; color:#6b7280; margin-bottom:0.15rem;'>"
+                            f"{idx}. {source} (score: {score:.3f})"
+                            "</div>"
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                    if chunk_preview:
+                        st.markdown(
+                            (
+                                "<div style='font-size:0.72rem; color:#6b7280; "
+                                "line-height:1.3; margin-bottom:0.55rem;'>"
+                                f"{html.escape(chunk_preview)}"
+                                "</div>"
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    if full_chunk_text:
+                        st.markdown(
+                            (
+                                "<details style='margin-bottom:0.7rem;'>"
+                                "<summary style='font-size:0.72rem; color:#4b5563; cursor:pointer;'>"
+                                "Show more"
+                                "</summary>"
+                                "<div style='font-size:0.72rem; color:#6b7280; line-height:1.35; "
+                                "margin-top:0.35rem; padding-left:0.2rem;'>"
+                                f"{full_chunk_text}"
+                                "</div>"
+                                "</details>"
+                            ),
+                            unsafe_allow_html=True,
+                        )
 
     # 5) Scenario comparison
     st.subheader("Scenario Comparison")

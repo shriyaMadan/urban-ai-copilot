@@ -1,0 +1,31 @@
+# Flood Response Guidelines
+
+## Objective
+- Protect life, critical infrastructure, and mobility corridors during flood risk periods.
+
+## Activation Triggers
+- Rainfall forecast exceeds local drainage capacity thresholds.
+- River level trend is rising rapidly.
+- Field reports confirm recurring waterlogging in vulnerable districts.
+
+## Immediate Operations (0–2 Hours)
+- Activate city coordination cell and assign incident lead.
+- Prioritize drainage inspection at known hotspot junctions.
+- Pre-stage pumps, barriers, and field crews in low-lying zones.
+- Coordinate with transport teams on underpass and tunnel monitoring.
+
+## Stabilization Actions (2–12 Hours)
+- Reassess district risk every operational cycle.
+- Restrict access to repeatedly flooded streets.
+- Protect critical facilities (hospitals, power, transit nodes).
+- Maintain resource reserve for secondary incidents.
+
+## Public Safety Messaging
+- Issue short district-specific advisories with clear actions.
+- Publish safe-route and avoidance guidance for commuters.
+- Repeat updates at fixed intervals with timestamped status.
+
+## Stand-Down Criteria
+- Rainfall intensity and river trend return to stable range.
+- Critical routes are passable and monitored.
+- No active life-safety incidents remain.

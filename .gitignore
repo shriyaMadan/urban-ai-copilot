@@ -1,12 +1,17 @@
 .env
+.env.*
+!.env.example
 /.streamlit/secrets.toml
 /data/flood_training.csv
+/data/qdrant/
 
 # Python cache/artifacts
-__pycache__/
+./__pycache__/
 **/__pycache__/
+*.pyc
 *.py[cod]
 **/*.py[cod]
+*.pyc.*
 *.pyo
 .coverage
 .coverage.*
@@ -15,6 +20,12 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+.python-version
+
+# Build/distribution artifacts
+build/
+dist/
+*.egg-info/
 
 # Virtual envs
 .venv/

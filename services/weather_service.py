@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Any, Dict, Optional
 
 import requests
+
+
+logger = logging.getLogger(__name__)
 
 
 WEATHER_CODE_MAP: Dict[int, tuple[str, str]] = {
@@ -53,6 +57,12 @@ class WeatherService:
             except (requests.RequestException, KeyError, IndexError, TypeError, ValueError) as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
 
+        if last_error:
+            logger.warning(
+                "Weather live fetch failed; using fallback weather | city=%s | error=%s",
+                city,
+                last_error,
+            )
         return self.get_mock_weather(city, error_message=last_error)
 
     def _fetch_live_weather(self, city: str) -> Dict[str, Any]:

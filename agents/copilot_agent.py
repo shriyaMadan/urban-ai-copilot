@@ -1,7 +1,7 @@
 """AI copilot agent for operational recommendations."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 import os
 from pathlib import Path
@@ -20,6 +20,7 @@ class CopilotPlan:
     urgency: str
     rationale: str
     recommendations: List[CopilotRecommendation]
+    retrieved_guidance: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize plan to a plain dictionary for UI/API use."""
@@ -28,6 +29,7 @@ class CopilotPlan:
             "urgency": self.urgency,
             "rationale": self.rationale,
             "recommendations": [asdict(item) for item in self.recommendations],
+            "retrieved_guidance": list(self.retrieved_guidance),
         }
 
 
@@ -39,9 +41,23 @@ class CopilotAgent:
     2) Rule-based fallback mode: deterministic recommendations (implemented)
     """
 
-    def __init__(self, has_ai_key: bool | None = None, timeout: int = 20) -> None:
+    def __init__(
+        self,
+        has_ai_key: bool | None = None,
+        timeout: int = 20,
+        rag_enabled: bool | None = None,
+        rag_top_k: int = 4,
+        rag_collection: str = "urban_guidance_docs",
+        rag_qdrant_path: str = "data/qdrant",
+        embedding_model: str | None = None,
+    ) -> None:
         self.has_ai_key = has_ai_key
         self.timeout = timeout
+        self.rag_enabled = rag_enabled
+        self.rag_top_k = rag_top_k
+        self.rag_collection = rag_collection
+        self.rag_qdrant_path = rag_qdrant_path
+        self.embedding_model = embedding_model
 
     def generate_operational_recommendations(
         self,
@@ -171,15 +187,28 @@ class CopilotAgent:
         if not config:
             raise ValueError("Missing OpenAI-compatible LLM configuration.")
 
+        top_risk = self._dominant_risk(flood_risk, heat_risk, traffic_risk)
+        retrieved_guidance = self._retrieve_guidance(
+            city_state=city_state,
+            flood_risk=flood_risk,
+            heat_risk=heat_risk,
+            traffic_risk=traffic_risk,
+        )
+
         system_prompt = (
             "You are an urban operations copilot. Provide concise, professional, "
-            "actionable recommendations for municipal planners."
+            "actionable recommendations for municipal planners. Never output unresolved "
+            "placeholders such as [area], [time], or [risk/event]. Use the known city name, "
+            "specific district wording when available, or a concrete generic phrase such as "
+            "affected district or next city update."
         )
         user_prompt = self._build_llm_prompt(
             city_state=city_state,
             flood_risk=flood_risk,
             heat_risk=heat_risk,
             traffic_risk=traffic_risk,
+            top_risk=top_risk,
+            retrieved_guidance=retrieved_guidance,
         )
 
         response = requests.post(
@@ -238,10 +267,11 @@ class CopilotAgent:
         ]
 
         return CopilotPlan(
-            mode="ai",
+            mode="ai_rag" if retrieved_guidance else "ai",
             urgency=urgency,
             rationale=rationale,
             recommendations=recommendations,
+            retrieved_guidance=retrieved_guidance,
         )
 
     def _should_use_ai_mode(self) -> bool:
@@ -311,18 +341,225 @@ class CopilotAgent:
         flood_risk: Mapping[str, Any],
         heat_risk: Mapping[str, Any],
         traffic_risk: Mapping[str, Any],
+        top_risk: str,
+        retrieved_guidance: List[Dict[str, Any]] | None = None,
     ) -> str:
         """Build concise prompt for structured operational recommendations."""
+        built_in_guidance = self._build_domain_guidance(
+            top_risk=top_risk,
+            city_state=city_state,
+            flood_risk=flood_risk,
+            heat_risk=heat_risk,
+            traffic_risk=traffic_risk,
+        )
+        guidance_block = ""
+        if retrieved_guidance:
+            guidance_lines = []
+            for idx, item in enumerate(retrieved_guidance, start=1):
+                source = str(item.get("source", "unknown"))
+                snippet = str(item.get("text", "")).strip()
+                if len(snippet) > 380:
+                    snippet = f"{snippet[:379].rstrip()}…"
+                guidance_lines.append(f"{idx}. [{source}] {snippet}")
+
+            joined_guidance = "\n".join(guidance_lines)
+
+            guidance_block = (
+                "\n\nretrieved_guidance: "
+                "(Use this guidance when relevant; if insufficient, say so briefly.)\n"
+                f"{joined_guidance}"
+            )
+
         return (
             "Given the city state and risk scores below, return JSON only with keys: "
             "urgency, recommendations, rationale.\n"
             "- urgency: one of Low, Medium, High\n"
             "- recommendations: exactly 3 concise operational recommendations\n"
             "- rationale: one short sentence\n\n"
+            "Do not use placeholder tokens in the response. Replace any template wording with "
+            "specific city-aware phrasing when possible.\n"
+            "Prefer retrieved guidance when it is available. If retrieval is empty or insufficient, "
+            "use the built-in domain playbook and general emergency-management best practices.\n\n"
             f"city_state: {json.dumps(city_state.to_dict(), ensure_ascii=False)}\n"
             f"flood_risk: {json.dumps(dict(flood_risk), ensure_ascii=False)}\n"
             f"heat_risk: {json.dumps(dict(heat_risk), ensure_ascii=False)}\n"
-            f"traffic_risk: {json.dumps(dict(traffic_risk), ensure_ascii=False)}"
+            f"traffic_risk: {json.dumps(dict(traffic_risk), ensure_ascii=False)}\n"
+            f"dominant_risk: {top_risk}\n\n"
+            f"domain_playbook:\n{built_in_guidance}"
+            f"{guidance_block}"
+        )
+
+    def _dominant_risk(
+        self,
+        flood_risk: Mapping[str, Any],
+        heat_risk: Mapping[str, Any],
+        traffic_risk: Mapping[str, Any],
+    ) -> str:
+        """Return the highest-scoring operational risk domain."""
+        risk_scores = {
+            "flood": int(flood_risk.get("score", 0)),
+            "heat": int(heat_risk.get("score", 0)),
+            "traffic": int(traffic_risk.get("score", 0)),
+        }
+        return max(risk_scores, key=risk_scores.get)
+
+    def _build_domain_guidance(
+        self,
+        top_risk: str,
+        city_state: CityState,
+        flood_risk: Mapping[str, Any],
+        heat_risk: Mapping[str, Any],
+        traffic_risk: Mapping[str, Any],
+    ) -> str:
+        """Provide built-in operational playbook guidance independent of RAG."""
+        if top_risk == "flood":
+            return (
+                "1. Verify drainage, culverts, underpasses, and other low-lying choke points.\n"
+                f"2. Pre-position pumps, barriers, and field crews near {city_state.district_vulnerability} vulnerability districts.\n"
+                f"3. Increase monitoring of river levels ({city_state.river_water_level_cm:.1f} cm, trend: {city_state.river_trend}).\n"
+                "4. Prepare road closures, detours, and public warnings for inundation-prone corridors.\n"
+                "5. Coordinate emergency services, public works, and communications around the next 6-hour rainfall window.\n"
+                f"6. Escalate shelter/readiness and resident outreach if flood score remains elevated ({int(flood_risk.get('score', 0))})."
+            )
+
+        if top_risk == "heat":
+            return (
+                "1. Extend cooling-center capacity and hours.\n"
+                "2. Target welfare checks for elderly and medically vulnerable residents.\n"
+                "3. Shift outdoor municipal work away from peak-heat periods when possible.\n"
+                f"4. Push hydration and shade messaging while temperatures remain elevated ({city_state.temperature_c:.1f} C).\n"
+                f"5. Coordinate EMS and public health readiness if heat score remains elevated ({int(heat_risk.get('score', 0))})."
+            )
+
+        return (
+            "1. Protect emergency routes and key commuter corridors first.\n"
+            "2. Adjust signals, incident response staffing, and detour plans in congestion hotspots.\n"
+            f"3. Use public messaging to stagger travel if congestion remains high ({city_state.traffic_congestion_index:.1f}%).\n"
+            "4. Coordinate police, traffic control, and transit operations around disruption hotspots.\n"
+            f"5. Escalate corridor-level interventions if traffic score remains elevated ({int(traffic_risk.get('score', 0))})."
+        )
+
+    def _retrieve_guidance(
+        self,
+        city_state: CityState,
+        flood_risk: Mapping[str, Any],
+        heat_risk: Mapping[str, Any],
+        traffic_risk: Mapping[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Retrieve top guidance chunks for the current city situation."""
+        if not self._is_rag_enabled():
+            return []
+
+        embedding_config = self._load_embedding_config()
+        if not embedding_config:
+            return []
+
+        try:
+            from rag.embeddings import OpenAICompatibleEmbedder
+            from rag.retriever import RAGRetriever
+            from rag.vector_store import QdrantVectorStore
+        except Exception:
+            return []
+
+        try:
+            embedder = OpenAICompatibleEmbedder(
+                api_key=embedding_config["api_key"],
+                base_url=embedding_config["base_url"],
+                model=embedding_config["model"],
+                timeout=self.timeout,
+            )
+            vector_store = QdrantVectorStore(
+                qdrant_path=self.rag_qdrant_path,
+                collection_name=self.rag_collection,
+            )
+            retriever = RAGRetriever(
+                embedder=embedder,
+                vector_store=vector_store,
+                default_top_k=self.rag_top_k if self.rag_top_k > 0 else 4,
+            )
+            query = self._build_retrieval_query(
+                city_state=city_state,
+                flood_risk=flood_risk,
+                heat_risk=heat_risk,
+                traffic_risk=traffic_risk,
+            )
+            chunks = retriever.retrieve(query=query, top_k=self.rag_top_k)
+        except Exception:
+            return []
+
+        return [
+            {
+                "source": chunk.source,
+                "chunk_id": chunk.chunk_id,
+                "score": round(float(chunk.score), 4),
+                "text": chunk.text,
+            }
+            for chunk in chunks
+            if chunk.text.strip()
+        ]
+
+    def _is_rag_enabled(self) -> bool:
+        """Resolve RAG on/off from constructor config or environment."""
+        if self.rag_enabled is not None:
+            return self.rag_enabled
+
+        return self._read_config_value("RAG_ENABLED", "false").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def _load_embedding_config(self) -> Dict[str, str] | None:
+        """Load OpenAI-compatible embedding settings."""
+        embedding_model = (
+            self.embedding_model
+            or self._read_config_value("EMBEDDING_MODEL")
+        )
+        if not embedding_model:
+            return None
+
+        openai_api_key = self._read_config_value("OPENAI_API_KEY")
+        openai_base_url = self._read_config_value("OPENAI_BASE_URL")
+        if openai_api_key and openai_base_url:
+            return {
+                "api_key": openai_api_key,
+                "base_url": openai_base_url,
+                "model": embedding_model,
+            }
+
+        gemini_api_key = self._read_config_value("GEMINI_API_KEY")
+        if gemini_api_key:
+            return {
+                "api_key": gemini_api_key,
+                "base_url": self._read_config_value(
+                    "GEMINI_OPENAI_BASE_URL",
+                    "https://generativelanguage.googleapis.com/v1beta/openai",
+                )
+                or "https://generativelanguage.googleapis.com/v1beta/openai",
+                "model": embedding_model,
+            }
+
+        return None
+
+    def _build_retrieval_query(
+        self,
+        city_state: CityState,
+        flood_risk: Mapping[str, Any],
+        heat_risk: Mapping[str, Any],
+        traffic_risk: Mapping[str, Any],
+    ) -> str:
+        """Build retrieval query from current city situation summary."""
+        return (
+            f"City: {city_state.city}\n"
+            f"Flood risk: {flood_risk.get('score', 0)} ({flood_risk.get('level', 'Low')})\n"
+            f"Heat risk: {heat_risk.get('score', 0)} ({heat_risk.get('level', 'Low')})\n"
+            f"Traffic risk: {traffic_risk.get('score', 0)} ({traffic_risk.get('level', 'Low')})\n"
+            f"Rainfall next 6h: {city_state.rainfall_mm_next_6h:.1f} mm\n"
+            f"Temperature: {city_state.temperature_c:.1f} C\n"
+            f"Rush hour: {city_state.is_rush_hour}\n"
+            f"District vulnerability: {city_state.district_vulnerability}\n"
+            "Need operational guidance and city response playbook snippets."
         )
 
     def _parse_llm_response(self, content: str) -> Dict[str, Any]:

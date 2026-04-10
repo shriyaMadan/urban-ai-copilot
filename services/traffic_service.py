@@ -1,9 +1,13 @@
 """Traffic data service integration (TomTom + safe fallback)."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 import requests
+
+
+logger = logging.getLogger(__name__)
 
 
 class TrafficService:
@@ -27,6 +31,10 @@ class TrafficService:
     def get_traffic_context(self, city: str) -> Dict[str, Any]:
         """Return normalized traffic context for the requested city."""
         if not self.api_key:
+            logger.info(
+                "TomTom API key not configured; using fallback traffic context | city=%s",
+                city,
+            )
             return self.get_mock_traffic_context(city)
 
         try:
@@ -57,7 +65,12 @@ class TrafficService:
                 "traffic_free_flow_speed_kph": free_flow_speed,
                 "traffic_source": "tomtom",
             }
-        except (requests.RequestException, ValueError, TypeError, KeyError):
+        except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+            logger.warning(
+                "Traffic live fetch failed; using fallback traffic context | city=%s | error=%s",
+                city,
+                f"{type(exc).__name__}: {exc}",
+            )
             return self.get_mock_traffic_context(city)
 
     def get_mock_traffic_context(self, city: str) -> Dict[str, Any]:

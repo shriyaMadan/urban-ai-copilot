@@ -1,0 +1,37 @@
+# Public Communication Templates
+
+## Objective
+- Deliver clear, consistent, and actionable public messages during city risk events.
+
+## Core Message Structure
+- Situation: what is happening now.
+- Impact: who or what is affected.
+- Action: what residents should do immediately.
+- Timing: when next update will be issued.
+
+## Template: Initial Advisory
+- "City operations advisory: a risk event is active in the affected district."
+- "Expected impact: localized disruption to mobility, services, or public safety conditions."
+- "Please follow the top protective actions issued by the city response team."
+- "The next city update will be issued through official city channels."
+
+## Template: Escalation Notice
+- "Update: risk level has increased in the affected district."
+- "Avoid affected roads, exposed zones, and non-essential movement."
+- "If affected: follow immediate safety instructions and use the designated city contact channel."
+- "Emergency access routes are being prioritized."
+
+## Template: Stabilization Update
+- "Update: conditions are stabilizing in the affected district."
+- "Some temporary restrictions remain in selected locations."
+- "Continue following guidance until full all-clear is issued."
+
+## Template: All-Clear Notice
+- "All-clear: conditions have returned to operationally safe levels."
+- "Residual caution may remain in isolated streets, drainage points, or transport corridors."
+- "City services returning to standard schedule."
+
+## Quality Controls
+- Use plain language and avoid technical jargon.
+- Include timestamp and geographic scope in every message.
+- Keep message length short; prioritize actionable instructions.

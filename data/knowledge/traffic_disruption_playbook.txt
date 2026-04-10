@@ -1,0 +1,31 @@
+# Traffic Disruption Playbook
+
+## Objective
+- Maintain emergency access, reduce network gridlock, and protect commuter safety.
+
+## Activation Triggers
+- Congestion index exceeds critical threshold on primary corridors.
+- Multi-node incidents affect arterial routes or public transport hubs.
+- Weather impacts are likely to cause sustained speed reductions.
+
+## Immediate Operations (0–2 Hours)
+- Activate traffic operations lead and incident command channel.
+- Prioritize clearance on emergency routes and hospital access roads.
+- Deploy dynamic signal timing for affected corridors.
+- Publish immediate rerouting instructions for major bottlenecks.
+
+## Stabilization Actions (2–12 Hours)
+- Coordinate lane management and temporary diversions.
+- Increase incident-response patrol presence at recurrent choke points.
+- Align transit operators on frequency adjustments and passenger messaging.
+- Reassess corridor priorities each operations cycle.
+
+## Public Guidance
+- Provide route alternatives with expected delay ranges.
+- Recommend staggered travel times for non-essential trips.
+- Communicate transit substitutions where available.
+
+## Stand-Down Criteria
+- Critical corridors return to acceptable flow conditions.
+- Incident queue length declines below operational threshold.
+- Emergency and public transport reliability is restored.

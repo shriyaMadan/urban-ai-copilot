@@ -1,0 +1,31 @@
+# Heatwave Response Guidelines
+
+## Objective
+- Reduce heat-related illness and maintain continuity of critical city services.
+
+## Activation Triggers
+- Forecast indicates sustained high temperature and high nighttime minimums.
+- Heat index exceeds local health-risk threshold.
+- Health services report rising heat-stress incidents.
+
+## Immediate Operations (0–2 Hours)
+- Activate heat response coordination and assign lead departments.
+- Extend cooling-center hours and verify staffing.
+- Prioritize welfare checks for elderly and medically vulnerable residents.
+- Coordinate hydration support at high-footfall transit locations.
+
+## Stabilization Actions (2–24 Hours)
+- Increase frequency of public transport and public-space heat monitoring.
+- Shift non-critical outdoor municipal work to cooler hours.
+- Ensure backup power readiness for health and cooling facilities.
+- Review district-level demand for water and shade resources.
+
+## Public Safety Messaging
+- Issue practical guidance: hydration, shade, reduced exertion, symptom awareness.
+- Publish cooling-center locations and operating hours.
+- Repeat advisories at fixed intervals during peak heat windows.
+
+## Stand-Down Criteria
+- Heat index returns to non-critical range for sustained period.
+- Emergency service heat-related call volume normalizes.
+- Cooling-center surge demand subsides.

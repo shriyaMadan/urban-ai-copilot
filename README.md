@@ -157,6 +157,22 @@ streamlit run app.py
 
 Then open the local URL printed by Streamlit.
 
+## RAG Knowledge Setup
+
+When `RAG_ENABLED=true`, the app retrieves guidance snippets from local knowledge files
+stored in `data/knowledge` and indexed into local Qdrant storage.
+
+To build or rebuild the index manually from the project root, run:
+
+```bash
+cd urban-ai-copilot
+python -m rag.ingest
+```
+
+The app also attempts to bootstrap the local knowledge index automatically at startup
+when RAG is enabled. This helps deployments where `data/qdrant` is not committed and
+must be recreated from the checked-in knowledge files.
+
 ## How Scenario Simulation Works
 
 Simulation is applied to the baseline `CityState` in a deterministic way:
